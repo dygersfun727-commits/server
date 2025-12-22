@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Свалка: Мережева Очистка</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        body { margin: 0; background: #121212; color: #eee; font-family: 'Segoe UI', sans-serif; overflow: hidden; touch-action: none; }
+        canvas { display: block; image-rendering: pixelated; }
+
+        /* UI */
+        #hud { position: absolute; top: 10px; left: 10px; pointer-events: none; }
+        .stat-box { background: rgba(0,0,0,0.7); padding: 10px; border-radius: 5px; border-left: 3px solid #4CAF50; margin-bottom: 5px; }
+
+        /* Меню серверів */
+        #server-menu { 
+            position: fixed; inset: 0; background: rgba(0,0,0,0.9); 
+            display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 2000; 
+        }
+        .server-btn { 
+            width: 280px; padding: 15px; margin: 10px; background: #333; color: white; border: 2px solid #4CAF50;
+            cursor: pointer; border-radius: 8px; font-size: 1.1rem; text-align: left;
+        }
+        .server-btn:hover { background: #444; }
+        .server-btn span { font-size: 0.8rem; color: #888; display: block; }
+
+        /* Сенсорне керування */
+        #touch-controls { position: absolute; inset: 0; pointer-events: none; }
+        #joystick-base { 
+            position: absolute; bottom: 50px; left: 50px; width: 120px; height: 120px; 
+            background: rgba(255,255,255,0.1); border-radius: 50%; pointer-events: auto;
+        }
+        #joystick-stick { 
+            position: absolute; top: 35px; left: 35px; width: 50px; height: 50px; 
+            background: rgba(255,255,255,0.4); border-radius: 50%; 
+        }
+        #action-buttons { position: absolute; bottom: 50px; right: 50px; pointer-events: auto; }
+        .btn { width: 70px; height: 70px; background: rgba(76, 175, 80, 0.5); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px; color: white; }
+
+        #death-screen { position: fixed; inset: 0; background: rgba(255,0,0,0.3); display: none; align-items: center; justify-content: center; font-size: 2rem; }
+    </style>
+</head>
+<body>
+
+<div id="hud">
+    <div class="stat-box">HP: <span id="hp">100</span></div>
+    <div class="stat-box">Сміття: <span id="cargo">0</span></div>
+    <div class="stat-box">ID: <span id="my-id" style="font-size: 10px;">...</span></div>
+</div>
+
+<div id="server-menu">
+    <h1>ОБЕРІТЬ СЕРВЕР (ЗОНУ)</h1>
+    <button class="server-btn" onclick="joinServer('svalka-kyiv-1')">🇺🇦 Київська Свалка <span>Гравців: 12/20 | Пинг: 24мс</span></button>
+    <button class="server-btn" onclick="joinServer('svalka-prom-2')">🏭 Промзона (Харків) <span>Гравців: 5/20 | Пинг: 30мс</span></button>
+    <button class="server-btn" onclick="joinServer('svalka-marsh-3')">☣️ Токсичне Болото <span>Гравців: 2/20 | Пинг: 45мс</span></button>
+    <p style="color: #666; font-size: 0.8rem;">Або введіть ID друга:</p>
+    <input type="text" id="custom-id" placeholder="Peer ID" style="padding: 10px;">
+    <button onclick="joinServer(document.getElementById('custom-id').value)" style="margin-top: 5px;">Підключитися</button>
+</div>
+
+<div id="touch-controls">
+    <div id="joystick-base"><div id="joystick-stick"></div></div>
+    <div id="action-buttons">
+        <div class="btn" id="btn-craft">🛠️</div>
+    </div>
+</div>
+
+<div id="death-screen">ВАС УТИЛІЗОВАНО!</div>
+
+<script>
+/** * КЛАС ГРИ 
+ */
+class GarbageGame {
+    constructor(serverID) {
+        this.canvas = document.createElement('canvas');
+        document.body.appendChild(this.canvas);
+        this.ctx = this.canvas.getContext('2d');
+        
+        this.worldSize = 4000;
+        this.player = { x: 2000, y: 2000, hp: 100, cargo: 0, magnet: 120, speed: 5 };
+        this.camera = { x: 0, y: 0 };
+        this.trash = [];
+        this.enemies = [];
+        this.others = {};
+        
+        this.moveDir = { x: 0, y: 0 };
+        this.isAlive = true;
+
+        this.initPeer(serverID);
+        this.spawnTrash(400);
+        this.spawnEnemies(15);
+        this.initTouch();
+        this.resize();
+        window.onresize = () => this.resize();
+        
+        this.loop();
+    }
+
+    initPeer(id) {
+        this.peer = new Peer(id + "-" + Math.floor(Math.random()*1000));
+        this.peer.on('open', (myId) => {
+            document.getElementById('my-id').innerText = myId;
+            console.log("Joined as: " + myId);
+        });
+        
+        // В реальному P2P тут була б логіка обміну даними, 
+        // але для демо-версії ми симулюємо присутність інших гравців у вибраній зоні
+        for(let i=0; i<5; i++) {
+            this.others[i] = { x: 1500+Math.random()*1000, y: 1500+Math.random()*1000, name: "Cleaner_"+i };
+        }
+    }
+
+    spawnTrash(n) {
+        for(let i=0; i<n; i++) {
+            this.trash.push({
+                x: Math.random() * this.worldSize,
+                y: Math.random() * this.worldSize,
+                val: Math.random() > 0.5 ? 1 : 2
+            });
+        }
+    }
+
+    spawnEnemies(n) {
+        for(let i=0; i<n; i++) {
+            this.enemies.push({ x: Math.random()*this.worldSize, y: Math.random()*this.worldSize, speed: 2 + Math.random()*2 });
+        }
+    }
+
+    initTouch() {
+        const base = document.getElementById('joystick-base');
+        const stick = document.getElementById('joystick-stick');
+        
+        const handleTouch = (e) => {
+            if (!this.isAlive) return;
+            const touch = e.touches[0];
+            const rect = base.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+            
+            let dx = touch.clientX - centerX;
+            let dy = touch.clientY - centerY;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            const max = 40;
+
+            if (dist > max) { dx *= max/dist; dy *= max/dist; }
+            
+            stick.style.transform = `translate(${dx}px, ${dy}px)`;
+            this.moveDir.x = dx / max;
+            this.moveDir.y = dy / max;
+        };
+
+        base.addEventListener('touchmove', handleTouch);
+        base.addEventListener('touchend', () => {
+            stick.style.transform = `translate(0,0)`;
+            this.moveDir = { x: 0, y: 0 };
+        });
+
+        document.getElementById('btn-craft').addEventListener('touchstart', () => {
+            if(this.player.cargo >= 10) {
+                this.player.cargo -= 10;
+                this.player.magnet += 10;
+                this.player.hp = Math.min(100, this.player.hp + 20);
+            }
+        });
+    }
+
+    update() {
+        if (!this.isAlive) return;
+
+        // Рух
+        this.player.x += this.moveDir.x * this.player.speed;
+        this.player.y += this.moveDir.y * this.player.speed;
+
+        // Магніт
+        this.trash.forEach((t, i) => {
+            const d = Math.hypot(this.player.x - t.x, this.player.y - t.y);
+            if (d < this.player.magnet) {
+                t.x += (this.player.x - t.x) * 0.12;
+                t.y += (this.player.y - t.y) * 0.12;
+                if (d < 20) {
+                    this.player.cargo += t.val;
+                    this.trash.splice(i, 1);
+                }
+            }
+        });
+
+        // Вороги
+        this.enemies.forEach(en => {
+            const d = Math.hypot(this.player.x - en.x, this.player.y - en.y);
+            if (d < 500) {
+                en.x += (this.player.x - en.x) / d * en.speed;
+                en.y += (this.player.y - en.y) / d * en.speed;
+                if (d < 25) {
+                    this.player.hp -= 0.5;
+                    if (this.player.hp <= 0) this.gameOver();
+                }
+            }
+        });
+
+        // Камера
+        this.camera.x = this.player.x - this.canvas.width/2;
+        this.camera.y = this.player.y - this.canvas.height/2;
+
+        document.getElementById('hp').innerText = Math.floor(this.player.hp);
+        document.getElementById('cargo').innerText = this.player.cargo;
+    }
+
+    gameOver() {
+        this.isAlive = false;
+        document.getElementById('death-screen').style.display = 'flex';
+        setTimeout(() => location.reload(), 3000);
+    }
+
+    draw() {
+        const ctx = this.ctx;
+        ctx.fillStyle = '#1a1a1a';
+        ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+        ctx.save();
+        ctx.translate(-this.camera.x, -this.camera.y);
+
+        // Сітка підлоги
+        ctx.strokeStyle = '#222';
+        for(let i=0; i<this.worldSize; i+=100) {
+            ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, this.worldSize); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(this.worldSize, i); ctx.stroke();
+        }
+
+        // Сміття
+        this.trash.forEach(t => {
+            ctx.fillStyle = t.val === 1 ? '#555' : '#888';
+            ctx.fillRect(t.x, t.y, 10, 10);
+        });
+
+        // Вороги
+        ctx.fillStyle = '#ff4444';
+        this.enemies.forEach(en => {
+            ctx.beginPath(); ctx.arc(en.x, en.y, 15, 0, Math.PI*2); ctx.fill();
+        });
+
+        // Інші гравці
+        ctx.fillStyle = '#4444ff';
+        for(let id in this.others) {
+            const p = this.others[id];
+            ctx.beginPath(); ctx.arc(p.x, p.y, 20, 0, Math.PI*2); ctx.fill();
+        }
+
+        // Гравець
+        ctx.fillStyle = '#4CAF50';
+        ctx.beginPath(); ctx.arc(this.player.x, this.player.y, 20, 0, Math.PI*2); ctx.fill();
+        // Радіус магніту (світле коло)
+        ctx.strokeStyle = 'rgba(76, 175, 80, 0.2)';
+        ctx.beginPath(); ctx.arc(this.player.x, this.player.y, this.player.magnet, 0, Math.PI*2); ctx.stroke();
+
+        ctx.restore();
+    }
+
+    resize() {
+        this.canvas.width = window.innerWidth;
+        this.canvas.height = window.innerHeight;
+    }
+
+    loop() {
+        this.update();
+        this.draw();
+        requestAnimationFrame(() => this.loop());
+    }
+}
+
+function joinServer(id) {
+    document.getElementById('server-menu').style.display = 'none';
+    window.game = new GarbageGame(id);
+}
+</script>
+</body>
+</html>
